@@ -726,6 +726,8 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
                             pic->pict_type == AV_PICTURE_TYPE_B ? X265_TYPE_B :
                             X265_TYPE_AUTO;
 
+        x265pic[VIEW_0].format = ctx->params->format;
+
         ret = libx265_encode_set_roi(ctx, pic, &x265pic[VIEW_0]);
         if (ret < 0)
             return ret;

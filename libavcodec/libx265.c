@@ -42,6 +42,10 @@
 #include "atsc_a53.h"
 #include "sei.h"
 
+#define NR_VIEWS 2
+#define VIEW_0 0
+#define VIEW_1 1
+
 typedef struct ReorderedData {
     int64_t duration;
 
@@ -50,6 +54,13 @@ typedef struct ReorderedData {
 
     int in_use;
 } ReorderedData;
+
+typedef enum {
+    MULTIVIEW_OFF = 0,
+    MULTIVIEW_NORMAL,       // 2 separate frames for views
+    MULTIVIEW_SIDE_BY_SIDE, // views are arranged side by side
+    MULTIVIEW_OVER_UNDER,   // views are stacked vertically
+} MultiviewMode;
 
 typedef struct libx265Context {
     const AVClass *class;
@@ -81,6 +92,8 @@ typedef struct libx265Context {
     int roi_warned;
 
     DOVIContext dovi;
+
+    MultiviewMode multiviewMode;
 } libx265Context;
 
 static int is_keyframe(NalUnitType naltype)
@@ -250,6 +263,9 @@ static av_cold int libx265_encode_init(AVCodecContext *avctx)
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(avctx->pix_fmt);
     int ret;
 
+    // Just for testing. Should be set with a variable
+    ctx->multiviewMode = MULTIVIEW_OVER_UNDER;
+
     ctx->api = x265_api_get(desc->comp[0].depth);
     if (!ctx->api)
         ctx->api = x265_api_get(0);
@@ -294,6 +310,11 @@ FF_ENABLE_DEPRECATION_WARNINGS
     }
     ctx->params->sourceWidth     = avctx->width;
     ctx->params->sourceHeight    = avctx->height;
+    if (ctx->multiviewMode == MULTIVIEW_SIDE_BY_SIDE)
+        ctx->params->sourceWidth     = (avctx->width / 2);
+    if (ctx->multiviewMode == MULTIVIEW_OVER_UNDER)
+        ctx->params->sourceHeight    = (avctx->height / 2);
+
     ctx->params->bEnablePsnr     = !!(avctx->flags & AV_CODEC_FLAG_PSNR);
     ctx->params->bOpenGOP        = !(avctx->flags & AV_CODEC_FLAG_CLOSED_GOP);
 
@@ -514,6 +535,9 @@ FF_ENABLE_DEPRECATION_WARNINGS
         }
     }
 
+    if (ctx->multiviewMode != MULTIVIEW_OFF)
+        ctx->params->numLayers = 2;
+
     if (ctx->params->rc.vbvBufferSize && avctx->rc_initial_buffer_occupancy > 1000 &&
         ctx->params->rc.vbvBufferInit == 0.9) {
         ctx->params->rc.vbvBufferInit = (float)avctx->rc_initial_buffer_occupancy / 1000;
@@ -660,7 +684,8 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
                                 const AVFrame *pic, int *got_packet)
 {
     libx265Context *ctx = avctx->priv_data;
-    x265_picture x265pic;
+    x265_picture x265pic[NR_VIEWS];
+
 #if (X265_BUILD >= 210) && (X265_BUILD < 213)
     x265_picture x265pic_layers_out[MAX_SCALABLE_LAYERS];
     x265_picture* x265pic_lyrptr_out[MAX_SCALABLE_LAYERS];
@@ -677,9 +702,9 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     int ret;
     int i;
 
-    ctx->api->picture_init(ctx->params, &x265pic);
+    ctx->api->picture_init(ctx->params, &x265pic[VIEW_0]);
 
-    sei = &x265pic.userSEI;
+    sei = &x265pic[VIEW_0].userSEI;
     sei->numPayloads = 0;
 
     if (pic) {
@@ -688,26 +713,26 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
         int rd_idx;
 
         for (i = 0; i < 3; i++) {
-           x265pic.planes[i] = pic->data[i];
-           x265pic.stride[i] = pic->linesize[i];
+           x265pic[VIEW_0].planes[i] = pic->data[i];
+           x265pic[VIEW_0].stride[i] = pic->linesize[i];
         }
 
-        x265pic.pts      = pic->pts;
-        x265pic.bitDepth = av_pix_fmt_desc_get(avctx->pix_fmt)->comp[0].depth;
+        x265pic[VIEW_0].pts      = pic->pts;
+        x265pic[VIEW_0].bitDepth = av_pix_fmt_desc_get(avctx->pix_fmt)->comp[0].depth;
 
-        x265pic.sliceType = pic->pict_type == AV_PICTURE_TYPE_I ?
+        x265pic[VIEW_0].sliceType = pic->pict_type == AV_PICTURE_TYPE_I ?
                                               (ctx->forced_idr ? X265_TYPE_IDR : X265_TYPE_I) :
                             pic->pict_type == AV_PICTURE_TYPE_P ? X265_TYPE_P :
                             pic->pict_type == AV_PICTURE_TYPE_B ? X265_TYPE_B :
                             X265_TYPE_AUTO;
 
-        ret = libx265_encode_set_roi(ctx, pic, &x265pic);
+        ret = libx265_encode_set_roi(ctx, pic, &x265pic[VIEW_0]);
         if (ret < 0)
             return ret;
 
         rd_idx = rd_get(ctx);
         if (rd_idx < 0) {
-            free_picture(ctx, &x265pic);
+            free_picture(ctx, &x265pic[VIEW_0]);
             return rd_idx;
         }
         rd = &ctx->rd[rd_idx];
@@ -718,12 +743,12 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
             ret = av_buffer_replace(&rd->frame_opaque_ref, pic->opaque_ref);
             if (ret < 0) {
                 rd_release(ctx, rd_idx);
-                free_picture(ctx, &x265pic);
+                free_picture(ctx, &x265pic[VIEW_0]);
                 return ret;
             }
         }
 
-        x265pic.userData = (void*)(intptr_t)(rd_idx + 1);
+        x265pic[VIEW_0].userData = (void*)(intptr_t)(rd_idx + 1);
 
         if (ctx->a53_cc) {
             void *sei_data;
@@ -741,7 +766,7 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
                         (sei->numPayloads + 1) * sizeof(*sei_payload));
                 if (!tmp) {
                     av_free(sei_data);
-                    free_picture(ctx, &x265pic);
+                    free_picture(ctx, &x265pic[VIEW_0]);
                     return AVERROR(ENOMEM);
                 }
                 ctx->sei_data = tmp;
@@ -767,7 +792,7 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
                         &ctx->sei_data_size,
                         (sei->numPayloads + 1) * sizeof(*sei_payload));
                 if (!tmp) {
-                    free_picture(ctx, &x265pic);
+                    free_picture(ctx, &x265pic[VIEW_0]);
                     return AVERROR(ENOMEM);
                 }
                 ctx->sei_data = tmp;
@@ -775,7 +800,7 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
                 sei_payload = &sei->payloads[sei->numPayloads];
                 sei_payload->payload = av_memdup(side_data->data, side_data->size);
                 if (!sei_payload->payload) {
-                    free_picture(ctx, &x265pic);
+                    free_picture(ctx, &x265pic[VIEW_0]);
                     return AVERROR(ENOMEM);
                 }
                 sei_payload->payloadSize = side_data->size;
@@ -790,16 +815,16 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
         if (ctx->dovi.cfg.dv_profile && sd) {
             const AVDOVIMetadata *metadata = (const AVDOVIMetadata *)sd->data;
             ret = ff_dovi_rpu_generate(&ctx->dovi, metadata, FF_DOVI_WRAP_NAL,
-                                       &x265pic.rpu.payload,
-                                       &x265pic.rpu.payloadSize);
+                                       &x265pic[VIEW_0].rpu.payload,
+                                       &x265pic[VIEW_0].rpu.payloadSize);
             if (ret < 0) {
-                free_picture(ctx, &x265pic);
+                free_picture(ctx, &x265pic[VIEW_0]);
                 return ret;
             }
         } else if (ctx->dovi.cfg.dv_profile) {
             av_log(avctx, AV_LOG_ERROR, "Dolby Vision enabled, but received frame "
                    "without AV_FRAME_DATA_DOVI_METADATA");
-            free_picture(ctx, &x265pic);
+            free_picture(ctx, &x265pic[VIEW_0]);
             return AVERROR_INVALIDDATA;
         }
 #endif
@@ -818,7 +843,7 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
 
     for (i = 0; i < sei->numPayloads; i++)
         av_free(sei->payloads[i].payload);
-    av_freep(&x265pic.quantOffsets);
+    av_freep(&x265pic[VIEW_0].quantOffsets);
 
     if (ret < 0)
         return AVERROR_EXTERNAL;

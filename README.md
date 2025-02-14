@@ -1,3 +1,7 @@
+Please be advised to run multiview x265 you need to build the x265 with -DENABLE_MULTIVIEW=ON.
+In this version of ffmpeg only formats 1 (side-by-side) and 2 (over-under) work. The sample encoding JSON is given in project files. Thank you. 
+
+
 FFmpeg README
 =============
 

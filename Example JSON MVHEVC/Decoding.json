@@ -1,0 +1,5 @@
+"-i", "/<path>/<filename>.hevc",
+"-filter_complex", "[0:v:view:0][0:v:view:1]hstack",
+"-c:v", "libx265",
+"/<path>/<filename>.mp4",
+"-y"

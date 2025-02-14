@@ -1,0 +1,11 @@
+"-f", "rawvideo",
+"-pix_fmt", "yuv420p",
+"-s", "1920x2160",  
+"-r", "30",
+"-i", "/<path>/<filename>.yuv",
+"-c:v", "libx265",
+"-crf", "37",
+"-x265-params", "num-views=2:format=2",
+"-frames:v", "32",
+"/<path>/<filename>.hevc",
+"-y"

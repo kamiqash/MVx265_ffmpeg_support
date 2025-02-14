@@ -240,7 +240,6 @@ void av_free(void *ptr)
 #if HAVE_ALIGNED_MALLOC
     _aligned_free(ptr);
 #else
-    //printf("INSIDE POINTER: %p\n\n",ptr); //kq_debug
     free(ptr);
 #endif
 }

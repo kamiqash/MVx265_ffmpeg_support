@@ -264,7 +264,8 @@ static av_cold int libx265_encode_init(AVCodecContext *avctx)
     int ret;
 
     // Just for testing. Should be set with a variable
-    ctx->multiviewMode = MULTIVIEW_OVER_UNDER;
+    //ctx->multiviewMode = MULTIVIEW_OVER_UNDER;
+    ctx->multiviewMode = MULTIVIEW_OFF;
 
     ctx->api = x265_api_get(desc->comp[0].depth);
     if (!ctx->api)
@@ -308,18 +309,22 @@ FF_DISABLE_DEPRECATION_WARNINGS
                                    ;
 FF_ENABLE_DEPRECATION_WARNINGS
     }
-    ctx->params->sourceWidth     = avctx->width;
-    ctx->params->sourceHeight    = avctx->height;
-    if (ctx->multiviewMode == MULTIVIEW_SIDE_BY_SIDE)
+    //ctx->params->format;
+    
+    /*if (ctx->multiviewMode == MULTIVIEW_SIDE_BY_SIDE)
+    {
         ctx->params->sourceWidth     = (avctx->width / 2);
+        avctx->width = ctx->params->sourceWidth;
+    }
     if (ctx->multiviewMode == MULTIVIEW_OVER_UNDER)
-        ctx->params->sourceHeight    = (avctx->height / 2);
+        ctx->params->sourceHeight    = (avctx->height / 2);*/
+    
 
     ctx->params->bEnablePsnr     = !!(avctx->flags & AV_CODEC_FLAG_PSNR);
     ctx->params->bOpenGOP        = !(avctx->flags & AV_CODEC_FLAG_CLOSED_GOP);
 
     /* Tune the CTU size based on input resolution. */
-    if (ctx->params->sourceWidth < 64 || ctx->params->sourceHeight < 64)
+    /*if (ctx->params->sourceWidth < 64 || ctx->params->sourceHeight < 64)
         ctx->params->maxCUSize = 32;
     if (ctx->params->sourceWidth < 32 || ctx->params->sourceHeight < 32)
         ctx->params->maxCUSize = 16;
@@ -327,10 +332,10 @@ FF_ENABLE_DEPRECATION_WARNINGS
         av_log(avctx, AV_LOG_ERROR, "Image size is too small (%dx%d).\n",
                ctx->params->sourceWidth, ctx->params->sourceHeight);
         return AVERROR(EINVAL);
-    }
+    }*/
 
 
-    ctx->params->vui.bEnableVideoSignalTypePresentFlag = 1;
+    ctx->params->vui.bEnableVideoSignalTypePresentFlag = 0;//kq_VideoSignal
 
     if (avctx->color_range != AVCOL_RANGE_UNSPECIFIED)
         ctx->params->vui.bEnableVideoFullRangeFlag =
@@ -347,7 +352,7 @@ FF_ENABLE_DEPRECATION_WARNINGS
         avctx->colorspace      != AVCOL_SPC_UNSPECIFIED) {
 
         ctx->params->vui.bEnableColorDescriptionPresentFlag = 1;
-
+        
         // x265 validates the parameters internally
         ctx->params->vui.colorPrimaries          = avctx->color_primaries;
         ctx->params->vui.transferCharacteristics = avctx->color_trc;
@@ -534,9 +539,32 @@ FF_ENABLE_DEPRECATION_WARNINGS
             }
         }
     }
+    //ctx->params->format;
+    ctx->params->sourceWidth     = avctx->width;
+    ctx->params->sourceHeight    = avctx->height;
+    if (ctx->params->format == 1)
+    {
+        ctx->params->sourceWidth     = (avctx->width / 2);
+        avctx->width = ctx->params->sourceWidth;
+    }
+    if (ctx->params->format == 2)
+        ctx->params->sourceHeight    = (avctx->height / 2);
 
-    if (ctx->multiviewMode != MULTIVIEW_OFF)
+    if (ctx->params->sourceWidth < 64 || ctx->params->sourceHeight < 64)
+        ctx->params->maxCUSize = 32;
+    if (ctx->params->sourceWidth < 32 || ctx->params->sourceHeight < 32)
+        ctx->params->maxCUSize = 16;
+    if (ctx->params->sourceWidth < 16 || ctx->params->sourceHeight < 16) {
+        av_log(avctx, AV_LOG_ERROR, "Image size is too small (%dx%d).\n",
+               ctx->params->sourceWidth, ctx->params->sourceHeight);
+        return AVERROR(EINVAL);
+    }
+
+    if (ctx->params->format != 0)
         ctx->params->numLayers = 2;
+
+    /*if (ctx->multiviewMode != MULTIVIEW_OFF)
+        ctx->params->numLayers = 2;*/
 
     if (ctx->params->rc.vbvBufferSize && avctx->rc_initial_buffer_occupancy > 1000 &&
         ctx->params->rc.vbvBufferInit == 0.9) {
@@ -706,15 +734,22 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
 
     sei = &x265pic[VIEW_0].userSEI;
     sei->numPayloads = 0;
-
+    int multiview = 0;
     if (pic) {
         AVFrameSideData *sd;
         ReorderedData *rd;
         int rd_idx;
-
-        for (i = 0; i < 3; i++) {
-           x265pic[VIEW_0].planes[i] = pic->data[i];
-           x265pic[VIEW_0].stride[i] = pic->linesize[i];
+        if(multiview){
+            for (i = 0; i < 3; i++) {
+            x265pic[VIEW_0].planes[i] = pic->data[i];
+            x265pic[VIEW_0].stride[i] = pic->linesize[i]/2;
+            }
+        }
+        else{
+            for (i = 0; i < 3; i++) {
+            x265pic[VIEW_0].planes[i] = pic->data[i];
+            x265pic[VIEW_0].stride[i] = pic->linesize[i];
+            }
         }
 
         x265pic[VIEW_0].pts      = pic->pts;
@@ -727,7 +762,7 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
                             X265_TYPE_AUTO;
 
         x265pic[VIEW_0].format = ctx->params->format;
-
+        
         ret = libx265_encode_set_roi(ctx, pic, &x265pic[VIEW_0]);
         if (ret < 0)
             return ret;
@@ -840,12 +875,14 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
                                    pic ? &x265pic : NULL, x265pic_lyrptr_out);
 #else
     ret = ctx->api->encoder_encode(ctx->encoder, &nal, &nnal,
-                                   pic ? &x265pic : NULL, &x265pic_solo_out);
+                                   pic ? &x265pic[VIEW_0] : NULL, &x265pic_solo_out);
 #endif
 
     for (i = 0; i < sei->numPayloads; i++)
         av_free(sei->payloads[i].payload);
-    av_freep(&x265pic[VIEW_0].quantOffsets);
+    //printf("pointer: %p\n",&x265pic[VIEW_0].quantOffsets); //kq_debug
+    //av_freep(&x265pic[VIEW_0].quantOffsets);
+    
 
     if (ret < 0)
         return AVERROR_EXTERNAL;
